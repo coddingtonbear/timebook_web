@@ -19,5 +19,6 @@ setup(
     packages=['timebook_web',],
     install_requires = [
             'Flask',
+            'timebook'
         ]
 )
