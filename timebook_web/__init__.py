@@ -24,18 +24,19 @@ import hashlib
 import json
 import logging
 import subprocess
+import os.path
 from functools import wraps
 
 from flask import Flask, render_template, request
 
-from timebook import get_best_user_guess, CONFIG_FILE, \
-        LOGS, logger, TIMESHEET_DB, TimesheetRow, ChiliprojectLookupHelper
+from timebook import logger
+from timebook.chiliproject import ChiliprojectConnector
 from timebook.db import Database
-from timebook.dbutil import date_is_untracked
+from timebook.dbutil import date_is_untracked, get_entry_meta, TimesheetRow
 from timebook.config import parse_config
 
 __author__ = 'Adam Coddington <me@adamcoddington.net>'
-__version__ = (2, 0, 3)
+__version__ = (3, 5, 0)
 
 def get_version():
     return '.'.join(str(bit) for bit in __version__)
@@ -46,14 +47,14 @@ app = Flask(__name__)
 def reverse_filter(s):
     return hashlib.md5(s).hexdigest()
 
-def get_human_username(guess):
+def get_human_username(username):
     """
     Will check with the passwd database to see if a full name is available
     for the current user.  If one is, it will return that, otherwise, it will
     return the current username.
     """
     try:
-        process = subprocess.Popen(["getent", "passwd", guess], stdout = subprocess.PIPE)
+        process = subprocess.Popen(["getent", "passwd", username], stdout = subprocess.PIPE)
         process_data = process.communicate()
         user_info_string = process_data[0]
         if user_info_string:
@@ -61,24 +62,50 @@ def get_human_username(guess):
             user_details = user_info[4].split(",")
             if(user_details[0]):
                 return user_details[0]
-        return guess
+        return username
     except OSError:
         return None
+
+def error_view(message):
+    return render_template(
+            '500.html',
+            traceback=message
+        )
 
 def gather_information(view_func, *args, **kwargs):
     """Returns a valid database session for performing queries."""
     @wraps(view_func)
     def _wrapped_view_func(*args, **kwargs):
-        user = get_best_user_guess()
-        human_username = get_human_username(user)
-        cursor = Database(
-                    TIMESHEET_DB,
-                    CONFIG_FILE
+        try:
+            user = request.environ.get('TIMEBOOK_USER')
+            human_username = get_human_username(user)
+            config_file = os.path.expanduser("~%s/.config/timebook/timebook.ini" % user)
+            timesheet_db = os.path.expanduser("~%s/.config/timebook/sheets.db" % user)
+            config = parse_config(config_file)
+            config.add_section('temp')
+            config.set('temp', 'human_name', human_username)
+            cursor = Database(
+                        timesheet_db,
+                        config,
+                    )
+
+            if("TIMEBOOK_LOG_FILE" in request.environ.keys()):
+                from logging.handlers import RotatingFileHandler
+                file_handler = RotatingFileHandler(
+                    request.environ.get('TIMEBOOK_LOG_FILE'),
+                    maxBytes=2 ** 20,
+                    backupCount=1,
                 )
-        config = parse_config(CONFIG_FILE)
-        config.add_section('temp')
-        config.set('temp', 'human_name', human_username)
-        return view_func(cursor, config, *args, **kwargs)
+                file_handler.setLevel(logging.DEBUG)
+                app.logger.addHandler(file_handler)
+                logger.addHandler(file_handler)
+
+            logger.info(cursor.config)
+
+            return view_func(cursor, config, *args, **kwargs)
+        except Exception as e:
+            import traceback
+            return error_view("Error encountered: %s" % traceback.format_exc())
     return _wrapped_view_func
 
 @app.route("/posttest/", methods=["POST",])
@@ -249,7 +276,7 @@ def index(cursor, config):
         ORDER BY start_time DESC
         """).fetchall()
 
-    lookup_helper = ChiliprojectLookupHelper(db = cursor)
+    lookup_helper = ChiliprojectConnector(db = cursor)
     current = TimesheetRow.from_row(current_row)
     current.set_lookup_handler(lookup_helper)
 
@@ -257,6 +284,12 @@ def index(cursor, config):
     todays_tasks = []
     for task_row in todays_tasks_rows:
         task = TimesheetRow.from_row(task_row)
+        task.set_meta(
+                    get_entry_meta(
+                        cursor,
+                        task.id
+                    )
+                )
         task.set_lookup_handler(lookup_helper)
 
         hours_total = hours_total + task.total_hours
@@ -274,13 +307,3 @@ def index(cursor, config):
             todays_tasks = todays_tasks,
             hours_total = hours_total
         )
-
-from logging.handlers import RotatingFileHandler
-file_handler = RotatingFileHandler(
-    LOGS,
-    maxBytes = 2**20,
-    backupCount = 1,
-)
-file_handler.setLevel(logging.DEBUG)
-app.logger.addHandler(file_handler)
-logger.addHandler(file_handler)

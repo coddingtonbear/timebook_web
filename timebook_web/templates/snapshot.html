@@ -59,13 +59,10 @@
               </td>
               <td class="hours">{{ "%.2f"|format(entry.hours) }}</td>
               <td class="description">
-                {% if entry.is_ticket %}
-                  <a href="{{ entry.ticket_url }}">{{ entry.description }}</a>
+                {% if entry.ticket_number %}
+                  <a href="{{ entry.ticket_url }}">[#{{ entry.ticket_number}}] {{ entry.chili_detail }}</a>
                 {% else %}
                   {{ entry.description }}
-                {% endif %}
-                {% if entry.chili_detail %}
-                  <span>{{ entry.chili_detail }}</span>
                 {% endif %}
               </td>
             </tr>
